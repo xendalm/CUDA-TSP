@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package tsp;
+
+service TSPSolver {
+  rpc ProcessPopulation (PopulationRequest) returns (PopulationResponse);
+}
+
+message PopulationRequest {
+  repeated int32 global_population = 1;
+  repeated float global_fitness = 2;
+  repeated float cities_x = 3;
+  repeated float cities_y = 4;
+  int32 batch_size = 5;
+  int32 seed = 6;
+}
+
+message PopulationResponse {
+  repeated int32 updated_population = 1;
+  repeated float updated_fitness = 2;
+}

@@ -19,8 +19,6 @@ struct City {
 	float x, y;
 };
 
-std::vector<City> cities;
-
 __device__ __host__ float distance(City a, City b) {
 	return sqrtf((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y));
 }
@@ -150,7 +148,7 @@ __global__ void mutate(int* d_population, curandState* d_states) {
 	d_states[idx] = localState;
 }
 
-void tsp_genetic_algorithm_gpu() {
+void tsp_genetic_algorithm_gpu(const std::vector<City>& cities) {
 	City* d_cities;
 	int *d_population, *d_selected;
 	float* d_fitness;
@@ -234,7 +232,9 @@ void tsp_genetic_algorithm_gpu() {
 	cudaFree(d_states);
 }
 
-void load_cities(const std::string& filename) {
+std::vector<City> load_cities(const std::string& filename) {
+	std::vector<City> cities;
+
 	std::ifstream file(filename);
 	std::string line;
 	while (std::getline(file, line)) {
@@ -245,6 +245,8 @@ void load_cities(const std::string& filename) {
 			cities.push_back(city);
 		}
 	}
+
+	return cities;
 }
 
 int main(int argc, char* argv[]) {
@@ -253,9 +255,10 @@ int main(int argc, char* argv[]) {
 		return 1;
 	}
 
-	load_cities(argv[1]);
+	
+	std::vector<City> cities = load_cities(argv[1]);
 
-	tsp_genetic_algorithm_gpu();
+	tsp_genetic_algorithm_gpu(cities);
 
 	return 0;
 }

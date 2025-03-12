@@ -29,4 +29,4 @@ __global__ void reduce_min_fitness(float* d_fitness, float* d_min_fitness, int o
 
 // nvcc -c reduction.cu -o reduction.o
 // ar rcs libreduction.a reduction.o
-// nvcc main.cu -o main -L. -lreduction
+// nvcc tsp.cu -o tsp -L. -lreduction
