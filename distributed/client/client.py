@@ -16,12 +16,15 @@ def load_cities(filename):
     return cities
 
 
-def run_client(cities, POP_SIZE, GENERATIONS, MAX_GENERATIONS_WITHOUT_IMPROVEMENT):
-    channel1 = grpc.insecure_channel('localhost:50052')
-    channel2 = grpc.insecure_channel('localhost:50053')
+def run_client(cities, addresses, POP_SIZE, GENERATIONS, MAX_GENERATIONS_WITHOUT_IMPROVEMENT):
+    num_servers = len(addresses)
 
-    stub1 = tsp_pb2_grpc.TSPSolverStub(channel1)
-    stub2 = tsp_pb2_grpc.TSPSolverStub(channel2)
+    if POP_SIZE % num_servers != 0:
+        raise ValueError(f"POP_SIZE ({POP_SIZE}) must be divisible by num_servers ({num_servers})")
+
+    batch_size = POP_SIZE // num_servers
+    channels = [grpc.insecure_channel(addr) for addr in addresses]
+    stubs = [tsp_pb2_grpc.TSPSolverStub(channel) for channel in channels]
 
     CITIES = len(cities)
     population = np.hstack([np.random.permutation(CITIES) for _ in range(POP_SIZE)]).tolist()
@@ -35,41 +38,26 @@ def run_client(cities, POP_SIZE, GENERATIONS, MAX_GENERATIONS_WITHOUT_IMPROVEMEN
     for gen in range(GENERATIONS):
         print(f"Generation {gen}:", end=" ")
 
-        half = POP_SIZE // 2
+        with ThreadPoolExecutor(max_workers=num_servers) as executor:
+            futures = [
+                executor.submit(
+                    stub.ProcessPopulation,
+                    tsp_pb2.PopulationRequest(
+                        global_population=population,
+                        global_fitness=fitness,
+                        cities_x=cities_x,
+                        cities_y=cities_y,
+                        batch_size=batch_size,
+                        seed=gen * num_servers + i
+                    )
+                ) for i, stub in enumerate(stubs)
+            ]
 
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            future1 = executor.submit(
-                stub1.ProcessPopulation,
-                tsp_pb2.PopulationRequest(
-                    global_population=population,
-                    global_fitness=fitness,
-                    cities_x=cities_x,
-                    cities_y=cities_y,
-                    batch_size=half,
-                    seed=gen * 2
-                )
-            )
+            responses = [future.result() for future in futures]
 
-            future2 = executor.submit(
-                stub2.ProcessPopulation,
-                tsp_pb2.PopulationRequest(
-                    global_population=population,
-                    global_fitness=fitness,
-                    cities_x=cities_x,
-                    cities_y=cities_y,
-                    batch_size=half,
-                    seed=gen * 2 + 1
-                )
-            )
-
-            response1 = future1.result()
-            response2 = future2.result()
-
-        population[:half * CITIES] = response1.updated_population
-        population[half * CITIES:] = response2.updated_population
-
-        fitness[:half] = response1.updated_fitness
-        fitness[half:] = response2.updated_fitness
+        for i, response in enumerate(responses):
+            population[i * batch_size * CITIES:(i + 1) * batch_size * CITIES] = response.updated_population
+            fitness[i * batch_size:(i + 1) * batch_size] = response.updated_fitness
 
         gen_best_fitness = np.min(fitness)
         print(f"best fitness = {gen_best_fitness}")
@@ -93,4 +81,4 @@ if __name__ == "__main__":
     city_filename = sys.argv[1]
     cities = load_cities(city_filename)
 
-    run_client(cities, 50000, 500, 100)
+    run_client(cities, ["localhost:50052", "localhost:50053"], 50000, 500, 100)
