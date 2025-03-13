@@ -10,10 +10,9 @@ from numba.cuda.random import create_xoroshiro128p_states, xoroshiro128p_uniform
 
 warnings.simplefilter("ignore", category=NumbaPerformanceWarning)
 
-CITIES = 52
 BLOCK_SIZE = 512
-POP_SIZE = 5000
-GENERATIONS = 700
+POP_SIZE = 50000
+GENERATIONS = 500
 MAX_GENERATIONS_WITHOUT_IMPROVEMENT = 500
 MUTATION_RATE = 0.1
 TOURNAMENT_SIZE = 4
@@ -23,7 +22,7 @@ def load_cities(filename):
     cities = []
     with open(filename, 'r') as f:
         for line in f:
-            id, x, y = line.strip().split()
+            _, x, y = line.strip().split()
             cities.append((x, y))
     return cities
 
@@ -34,35 +33,35 @@ def cuda_distance(city1_x, city1_y, city2_x, city2_y):
 
 
 @cuda.jit
-def initialize_population_kernel(population, rng_states):
+def initialize_population_kernel(population, rng_states, cities_num):
     idx = cuda.grid(1)
     if idx >= POP_SIZE:
         return
 
-    for i in range(CITIES):
+    for i in range(cities_num):
         population[idx, i] = i
 
-    for i in range(CITIES):
-        j = int(xoroshiro128p_uniform_float32(rng_states, idx) * CITIES) % CITIES
+    for i in range(cities_num):
+        j = int(xoroshiro128p_uniform_float32(rng_states, idx) * cities_num) % cities_num
         temp = population[idx, i]
         population[idx, i] = population[idx, j]
         population[idx, j] = temp
 
 
 @cuda.jit
-def evaluate_fitness_kernel(population, cities_x, cities_y, fitness):
+def evaluate_fitness_kernel(population, cities_x, cities_y, fitness, cities_num):
     idx = cuda.grid(1)
     if idx >= POP_SIZE:
         return
 
     total_distance = 0.0
-    for i in range(CITIES - 1):
+    for i in range(cities_num - 1):
         city1_idx = population[idx, i]
         city2_idx = population[idx, i + 1]
         total_distance += cuda_distance(cities_x[city1_idx], cities_y[city1_idx],
                                         cities_x[city2_idx], cities_y[city2_idx])
 
-    city1_idx = population[idx, CITIES - 1]
+    city1_idx = population[idx, cities_num - 1]
     city2_idx = population[idx, 0]
     total_distance += cuda_distance(cities_x[city1_idx], cities_y[city1_idx],
                                     cities_x[city2_idx], cities_y[city2_idx])
@@ -70,7 +69,7 @@ def evaluate_fitness_kernel(population, cities_x, cities_y, fitness):
 
 
 @cuda.jit
-def tournament_selection_kernel(population, fitness, selected, rng_states):
+def tournament_selection_kernel(population, fitness, selected, rng_states, cities_num):
     idx = cuda.grid(1)
     if idx >= POP_SIZE:
         return
@@ -82,12 +81,12 @@ def tournament_selection_kernel(population, fitness, selected, rng_states):
         if fitness[candidate] < fitness[best_candidate]:
             best_candidate = candidate
 
-    for i in range(CITIES):
+    for i in range(cities_num):
         selected[idx, i] = population[best_candidate, i]
 
 
 @cuda.jit
-def crossover_kernel(population, selected, rng_states):
+def crossover_kernel(population, selected, offspring, used, rng_states, cities_num):
     idx = cuda.grid(1)
     if idx >= POP_SIZE // 2:
         return
@@ -95,55 +94,50 @@ def crossover_kernel(population, selected, rng_states):
     parent1_idx = 2 * idx
     parent2_idx = 2 * idx + 1
 
-    start = int(xoroshiro128p_uniform_float32(rng_states, idx) * CITIES) % CITIES
-    end = start + int(xoroshiro128p_uniform_float32(rng_states, idx) * (CITIES - start))
+    start = int(xoroshiro128p_uniform_float32(rng_states, idx) * cities_num) % cities_num
+    end = start + int(xoroshiro128p_uniform_float32(rng_states, idx) * (cities_num - start))
 
-    offspring1 = cuda.local.array(shape=(CITIES,), dtype=int32)
-    offspring2 = cuda.local.array(shape=(CITIES,), dtype=int32)
-    used1 = cuda.local.array(shape=(CITIES,), dtype=int32)
-    used2 = cuda.local.array(shape=(CITIES,), dtype=int32)
+    for i in range(cities_num):
+        used[parent1_idx, i] = 0
+        used[parent2_idx, i] = 0
 
-    for i in range(CITIES):
-        used1[i] = 0
-        used2[i] = 0
-
-    for i in range(0, CITIES):
-        offspring1[i] = selected[parent2_idx, i]
-        offspring2[i] = selected[parent1_idx, i]
-        used1[offspring1[i]] = 1
-        used2[offspring2[i]] = 1
+    for i in range(0, cities_num):
+        offspring[parent1_idx, i] = selected[parent2_idx, i]
+        offspring[parent2_idx, i] = selected[parent1_idx, i]
+        used[parent1_idx, offspring[parent1_idx, i]] = 1
+        used[parent2_idx, offspring[parent2_idx, i]] = 1
 
     pos1 = 0
     pos2 = 0
-    for i in range(CITIES):
+    for i in range(cities_num):
         city = selected[parent1_idx, i]
-        if not used1[city]:
+        if not used[parent1_idx, city]:
             while start <= pos1 <= end:
                 pos1 += 1
-            offspring1[pos1] = city
+            offspring[parent1_idx, pos1] = city
             pos1 += 1
 
         city = selected[parent2_idx, i]
-        if not used2[city]:
+        if not used[parent2_idx, city]:
             while start <= pos2 <= end:
                 pos2 += 1
-            offspring2[pos2] = city
+            offspring[parent2_idx, pos2] = city
             pos2 += 1
 
-    for i in range(CITIES):
-        population[parent1_idx, i] = offspring1[i]
-        population[parent2_idx, i] = offspring2[i]
+    for i in range(cities_num):
+        population[parent1_idx, i] = offspring[parent1_idx, i]
+        population[parent2_idx, i] = offspring[parent2_idx, i]
 
 
 @cuda.jit
-def mutate_kernel(population, rng_states):
+def mutate_kernel(population, rng_states, cities_num):
     idx = cuda.grid(1)
     if idx >= POP_SIZE:
         return
 
     if cuda.random.xoroshiro128p_uniform_float32(rng_states, idx) < MUTATION_RATE:
-        a = int(xoroshiro128p_uniform_float32(rng_states, idx) * CITIES) % CITIES
-        b = int(xoroshiro128p_uniform_float32(rng_states, idx) * CITIES) % CITIES
+        a = int(xoroshiro128p_uniform_float32(rng_states, idx) * cities_num) % cities_num
+        b = int(xoroshiro128p_uniform_float32(rng_states, idx) * cities_num) % cities_num
         temp = population[idx, a]
         population[idx, a] = population[idx, b]
         population[idx, b] = temp
@@ -156,20 +150,20 @@ def tsp_genetic_algorithm_cuda(cities):
     d_cities_x = cuda.to_device(cities_x)
     d_cities_y = cuda.to_device(cities_y)
 
-    population = np.zeros((POP_SIZE, CITIES), dtype=np.int32)
-    selected = np.zeros((POP_SIZE, CITIES), dtype=np.int32)
-    fitness = np.zeros(POP_SIZE, dtype=np.float32)
+    cities_num = len(cities)
 
-    d_population = cuda.to_device(population)
-    d_selected = cuda.to_device(selected)
-    d_fitness = cuda.to_device(fitness)
+    d_population = cuda.to_device(np.zeros((POP_SIZE, cities_num), dtype=np.int32))
+    d_selected = cuda.to_device(np.zeros((POP_SIZE, cities_num), dtype=np.int32))
+    d_fitness = cuda.to_device(np.zeros(POP_SIZE, dtype=np.float32))
+    d_offspring = cuda.to_device(np.zeros((POP_SIZE, cities_num), dtype=np.int32))
+    d_used = cuda.to_device(np.zeros((POP_SIZE, cities_num), dtype=np.int32))
 
     threads_per_block = BLOCK_SIZE
     blocks_per_grid = (POP_SIZE + threads_per_block - 1) // threads_per_block
     print(f"Blocks per grid: {blocks_per_grid}, Threads per block: {threads_per_block}")
 
     rng_states = create_xoroshiro128p_states(POP_SIZE, seed=int(time.time()))
-    initialize_population_kernel[blocks_per_grid, threads_per_block](d_population, rng_states)
+    initialize_population_kernel[blocks_per_grid, threads_per_block](d_population, rng_states, cities_num)
 
     best_fitness = float('inf')
     generations_wout_improvement = 0
@@ -177,7 +171,7 @@ def tsp_genetic_algorithm_cuda(cities):
     start_time = time.time()
 
     for gen in range(GENERATIONS):
-        evaluate_fitness_kernel[blocks_per_grid, threads_per_block](d_population, d_cities_x, d_cities_y, d_fitness)
+        evaluate_fitness_kernel[blocks_per_grid, threads_per_block](d_population, d_cities_x, d_cities_y, d_fitness, cities_num)
         cuda.synchronize()
 
         h_fitness = d_fitness.copy_to_host()
@@ -194,13 +188,13 @@ def tsp_genetic_algorithm_cuda(cities):
                     f"Generation {gen}: no improvement for {MAX_GENERATIONS_WITHOUT_IMPROVEMENT} generations. Stopping.")
                 break
 
-        tournament_selection_kernel[blocks_per_grid, threads_per_block](d_population, d_fitness, d_selected, rng_states)
+        tournament_selection_kernel[blocks_per_grid, threads_per_block](d_population, d_fitness, d_selected, rng_states, cities_num)
         cuda.synchronize()
 
-        crossover_kernel[blocks_per_grid, threads_per_block](d_population, d_selected, rng_states)
+        crossover_kernel[blocks_per_grid, threads_per_block](d_population, d_selected, d_offspring, d_used, rng_states, cities_num)
         cuda.synchronize()
 
-        mutate_kernel[blocks_per_grid, threads_per_block](d_population, rng_states)
+        mutate_kernel[blocks_per_grid, threads_per_block](d_population, rng_states, cities_num)
         cuda.synchronize()
 
     end_time = time.time()
@@ -216,7 +210,5 @@ if __name__ == "__main__":
 
     city_filename = sys.argv[1]
     cities = load_cities(city_filename)
-
-    CITIES = len(cities)
 
     tsp_genetic_algorithm_cuda(cities)

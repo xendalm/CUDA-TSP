@@ -24,46 +24,39 @@ logger.addHandler(ch)
 
 class TSPSolverServicer(tsp_pb2_grpc.TSPSolverServicer):
     def ProcessPopulation(self, request, context):
-        CITIES = len(request.cities_x)
-        GLOBAL_POP_SIZE = len(request.global_population) // CITIES
-        POP_SIZE = request.batch_size
+        cities_num = len(request.cities_x)
+        global_pop_size = len(request.global_population) // cities_num
+        batch_size = request.batch_size
 
-        global_population = np.array(request.global_population, dtype=np.int32).reshape((GLOBAL_POP_SIZE, CITIES))
-        global_fitness = np.array(request.global_fitness, dtype=np.float32)
-        cities_x = np.array(request.cities_x, dtype=np.float32)
-        cities_y = np.array(request.cities_y, dtype=np.float32)
-        selected = np.zeros((POP_SIZE, CITIES), dtype=np.int32)
-        fitness = np.zeros(POP_SIZE, dtype=np.float32)
-
-        d_global_population = cuda.to_device(global_population)
-        d_global_fitness = cuda.to_device(global_fitness)
-        d_cities_x = cuda.to_device(cities_x)
-        d_cities_y = cuda.to_device(cities_y)
-        d_selected = cuda.to_device(selected)
-        d_fitness = cuda.to_device(fitness)
-        rng_states = cuda.random.create_xoroshiro128p_states(POP_SIZE, seed=int(time.time()) + request.seed)
+        d_global_population = cuda.to_device(np.array(request.global_population, dtype=np.int32).reshape((global_pop_size, cities_num)))
+        d_global_fitness = cuda.to_device(np.array(request.global_fitness, dtype=np.float32))
+        d_cities_x = cuda.to_device(np.array(request.cities_x, dtype=np.float32))
+        d_cities_y = cuda.to_device(np.array(request.cities_y, dtype=np.float32))
+        d_selected = cuda.to_device(np.zeros((batch_size, cities_num), dtype=np.int32))
+        d_fitness = cuda.to_device(np.zeros(batch_size, dtype=np.float32))
+        rng_states = cuda.random.create_xoroshiro128p_states(batch_size, seed=int(time.time()) + request.seed)
 
         threads_per_block = BLOCK_SIZE
-        blocks_per_grid = (POP_SIZE + threads_per_block - 1) // threads_per_block
+        blocks_per_grid = (batch_size + threads_per_block - 1) // threads_per_block
 
-        logger.info(f"Global population {GLOBAL_POP_SIZE}, Local Population {POP_SIZE}, Cities {CITIES}, "
+        logger.info(f"Global population {global_pop_size}, Local Population {batch_size}, Cities {cities_num}, "
                     f"Blocks per grid: {blocks_per_grid}, Threads per block: {threads_per_block}")
 
         tournament_selection_kernel[blocks_per_grid, threads_per_block](d_selected, d_global_population,
-                                                                        d_global_fitness, rng_states, POP_SIZE, CITIES)
+                                                                        d_global_fitness, rng_states, batch_size, cities_num)
         cuda.synchronize()
 
-        d_offspring1 = cuda.to_device(np.zeros((POP_SIZE // 2, CITIES), dtype=np.int32))
-        d_offspring2 = cuda.to_device(np.zeros((POP_SIZE // 2, CITIES), dtype=np.int32))
-        crossover_kernel[blocks_per_grid, threads_per_block](d_selected, d_offspring1, d_offspring2, rng_states,
-                                                             POP_SIZE, CITIES)
+        d_offspring = cuda.to_device(np.zeros((batch_size, cities_num), dtype=np.int32))
+        d_used = cuda.to_device(np.zeros((batch_size, cities_num), dtype=np.int32))
+        crossover_kernel[blocks_per_grid, threads_per_block](d_selected, d_offspring, d_used, rng_states,
+                                                             batch_size, cities_num)
         cuda.synchronize()
 
-        mutate_kernel[blocks_per_grid, threads_per_block](d_selected, rng_states, POP_SIZE, CITIES)
+        mutate_kernel[blocks_per_grid, threads_per_block](d_selected, rng_states, batch_size, cities_num)
         cuda.synchronize()
 
         evaluate_fitness_kernel[blocks_per_grid, threads_per_block](d_selected, d_cities_x, d_cities_y, d_fitness,
-                                                                    POP_SIZE, CITIES)
+                                                                    batch_size, cities_num)
         cuda.synchronize()
 
         h_selected = d_selected.copy_to_host().flatten().tolist()

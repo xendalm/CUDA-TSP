@@ -11,7 +11,7 @@ def load_cities(filename):
     cities = []
     with open(filename, 'r') as f:
         for line in f:
-            id, x, y = line.strip().split()
+            _, x, y = line.strip().split()
             cities.append((float(x), float(y)))
     return cities
 
@@ -81,4 +81,4 @@ if __name__ == "__main__":
     city_filename = sys.argv[1]
     cities = load_cities(city_filename)
 
-    run_client(cities, ["localhost:50052", "localhost:50053"], 50000, 500, 100)
+    run_client(cities, ["localhost:50052", "localhost:50053"], 5000, 500, 100)
